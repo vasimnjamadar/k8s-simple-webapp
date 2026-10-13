@@ -118,8 +118,12 @@ ASKPASS
                           k8s/deployment.yaml
 
                         git add k8s/deployment.yaml
-                        git commit -m "Deploy simple-webapp build ${BUILD_NUMBER}"
-                        git -c credential.helper= push origin main
+			if ! git diff --cached --quiet; then
+				git commit -m "Deploy simple-webapp build ${BUILD_NUMBER}"
+				git -c credential.helper= push origin main
+			else
+				echo "No GitOps changes to commit"
+			fi
                     '''
                 }
             }
@@ -130,10 +134,33 @@ ASKPASS
                 sh '''
                     set -eu
 
-                    kubectl rollout status \
-                      deployment/"$DEPLOYMENT_NAME" \
-                      -n "$K8S_NAMESPACE" \
-                      --timeout=180s
+                    EXPECTED_IMAGE="$DOCKER_USER/$IMAGE_NAME:$BUILD_NUMBER"
+                    ATTEMPTS=0
+                    MAX_ATTEMPTS=60
+
+                    while [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; do
+                        CURRENT_IMAGE=$(kubectl get deployment "$DEPLOYMENT_NAME" \
+                            -n "$K8S_NAMESPACE" \
+                            -o jsonpath='{.spec.template.spec.containers[?(@.name=="web")].image}' \
+                            2>/dev/null || true)
+
+                        if [ "$CURRENT_IMAGE" = "$EXPECTED_IMAGE" ]; then
+                            break
+                        fi
+
+                        ATTEMPTS=$((ATTEMPTS + 1))
+                        echo "Waiting for Argo CD to apply $EXPECTED_IMAGE ($ATTEMPTS/$MAX_ATTEMPTS)"
+                        sleep 5
+                    done
+
+                    if [ "$CURRENT_IMAGE" != "$EXPECTED_IMAGE" ]; then
+                        echo "Expected image was not applied: $EXPECTED_IMAGE"
+                        echo "Current image: $CURRENT_IMAGE"
+                        exit 1
+                    fi
+
+                    kubectl rollout status deployment/"$DEPLOYMENT_NAME" \
+                        -n "$K8S_NAMESPACE" --timeout=180s
 
                     kubectl get pods -n "$K8S_NAMESPACE"
                     kubectl get service k8s-simple-webapp -n "$K8S_NAMESPACE"
